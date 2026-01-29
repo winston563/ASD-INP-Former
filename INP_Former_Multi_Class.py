@@ -11,13 +11,14 @@ from optimizers import StableAdamW
 from utils import evaluation_batch,WarmCosineScheduler, global_cosine_hm_adaptive, setup_seed, get_logger
 
 # Dataset-Related Modules
-from dataset import MVTecDataset, RealIADDataset
-from dataset import get_data_transforms
+from dataset import MVTecDataset, RealIADDataset, AudioAnomalyDataset
+from dataset import get_data_transforms, get_audio_transforms
 from torchvision.datasets import ImageFolder
 from torch.utils.data import DataLoader, ConcatDataset
 
 # Model-Related Modules
 from models import vit_encoder
+from models import eat_encoder
 from models.uad import INP_Former
 from models.vision_transformer import Mlp, Aggregation_Block, Prototype_Block
 
@@ -64,13 +65,59 @@ def main(args):
         train_data = ConcatDataset(train_data_list)
         train_dataloader = torch.utils.data.DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=4,
                                                        drop_last=True)
+    elif args.dataset == 'Audio-AD':
+        audio_transform, spec_transform, target_length = get_audio_transforms(
+            size=args.input_size,
+            isize=args.crop_size,
+            sample_rate=args.audio_sample_rate,
+            n_fft=args.audio_n_fft,
+            win_length=args.audio_win_length,
+            hop_length=args.audio_hop_length,
+            n_mels=args.audio_n_mels,
+            f_min=args.audio_f_min,
+            f_max=args.audio_f_max,
+            duration=args.audio_duration,
+            in_chans=args.audio_in_chans,
+            mean_train=args.audio_mean,
+            std_train=args.audio_std,
+        )
+        train_data = AudioAnomalyDataset(
+            root=args.data_path,
+            phase='train',
+            audio_transform=audio_transform,
+            spec_transform=spec_transform,
+            target_length=target_length,
+            sample_rate=args.audio_sample_rate,
+            in_chans=args.audio_in_chans,
+        )
+        test_data = AudioAnomalyDataset(
+            root=args.data_path,
+            phase='test',
+            audio_transform=audio_transform,
+            spec_transform=spec_transform,
+            target_length=target_length,
+            sample_rate=args.audio_sample_rate,
+            in_chans=args.audio_in_chans,
+        )
+        train_data_list = [train_data]
+        test_data_list = [test_data]
+        train_dataloader = torch.utils.data.DataLoader(
+            train_data,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=4,
+            drop_last=True,
+        )
     # Adopting a grouping-based reconstruction strategy similar to Dinomaly
     target_layers = [2, 3, 4, 5, 6, 7, 8, 9]
     fuse_layer_encoder = [[0, 1, 2, 3], [4, 5, 6, 7]]
     fuse_layer_decoder = [[0, 1, 2, 3], [4, 5, 6, 7]]
 
     # Encoder info
-    encoder = vit_encoder.load(args.encoder)
+    if args.encoder.startswith('eat_'):
+        encoder = eat_encoder.load(args.encoder, checkpoint_path=args.eat_ckpt, in_chans=args.audio_in_chans)
+    else:
+        encoder = vit_encoder.load(args.encoder)
     if 'small' in args.encoder:
         embed_dim, num_heads = 384, 6
     elif 'base' in args.encoder:
@@ -148,7 +195,7 @@ def main(args):
                 loss_list.append(loss.item())
                 lr_scheduler.step()
             print_fn('epoch [{}/{}], loss:{:.4f}'.format(epoch+1, args.total_epochs, np.mean(loss_list)))
-            if (epoch + 1) % args.total_epochs == 0:
+            if (epoch + 1) % args.eval_interval == 0:
                 auroc_sp_list, ap_sp_list, f1_sp_list = [], [], []
                 auroc_px_list, ap_px_list, f1_px_list, aupro_px_list = [], [], [], []
 
@@ -206,7 +253,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='')
 
     # dataset info
-    parser.add_argument('--dataset', type=str, default=r'MVTec-AD') # 'MVTec-AD' or 'VisA' or 'Real-IAD'
+    parser.add_argument('--dataset', type=str, default=r'MVTec-AD') # 'MVTec-AD' or 'VisA' or 'Real-IAD' or 'Audio-AD'
     parser.add_argument('--data_path', type=str, default=r'E:\IMSN-LW\dataset\mvtec_anomaly_detection') # Replace it with your path.
 
     # save info
@@ -214,7 +261,8 @@ if __name__ == '__main__':
     parser.add_argument('--save_name', type=str, default='INP-Former-Multi-Class')
 
     # model info
-    parser.add_argument('--encoder', type=str, default='dinov2reg_vit_base_14') # 'dinov2reg_vit_small_14' or 'dinov2reg_vit_base_14' or 'dinov2reg_vit_large_14'
+    parser.add_argument('--encoder', type=str, default='dinov2reg_vit_base_14') # 'dinov2reg_vit_small_14' or 'dinov2reg_vit_base_14' or 'dinov2reg_vit_large_14' or 'eat_base_10ep'
+    parser.add_argument('--eat_ckpt', type=str, default='', help='Path to EATModel base checkpoint trained for 10 epochs.')
     parser.add_argument('--input_size', type=int, default=448)
     parser.add_argument('--crop_size', type=int, default=392)
     parser.add_argument('--INP_num', type=int, default=6)
@@ -223,6 +271,20 @@ if __name__ == '__main__':
     parser.add_argument('--total_epochs', type=int, default=200)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--phase', type=str, default='train')
+    parser.add_argument('--eval_interval', type=int, default=1, help='Evaluate every N epochs.')
+
+    # audio preprocessing
+    parser.add_argument('--audio_sample_rate', type=int, default=16000)
+    parser.add_argument('--audio_duration', type=float, default=0.3)
+    parser.add_argument('--audio_n_fft', type=int, default=512)
+    parser.add_argument('--audio_win_length', type=int, default=400)
+    parser.add_argument('--audio_hop_length', type=int, default=160)
+    parser.add_argument('--audio_n_mels', type=int, default=128)
+    parser.add_argument('--audio_f_min', type=int, default=0)
+    parser.add_argument('--audio_f_max', type=int, default=8000)
+    parser.add_argument('--audio_in_chans', type=int, default=1)
+    parser.add_argument('--audio_mean', type=float, nargs='+', default=[0.0])
+    parser.add_argument('--audio_std', type=float, nargs='+', default=[1.0])
 
     args = parser.parse_args()
     args.save_name = args.save_name + f'_dataset={args.dataset}_Encoder={args.encoder}_Resize={args.input_size}_Crop={args.crop_size}_INP_num={args.INP_num}'
@@ -246,4 +308,6 @@ if __name__ == '__main__':
                  'porcelain_doll', 'regulator', 'rolled_strip_base', 'sim_card_set', 'switch', 'tape',
                  'terminalblock', 'toothbrush', 'toy', 'toy_brick', 'transistor1', 'usb',
                  'usb_adaptor', 'u_block', 'vcpill', 'wooden_beads', 'woodstick', 'zipper']
+    elif args.dataset == 'Audio-AD':
+        args.item_list = ['audio']
     main(args)
