@@ -115,7 +115,12 @@ def main(args):
 
     # Encoder info
     if args.encoder.startswith('eat_'):
-        encoder = eat_encoder.load(args.encoder, checkpoint_path=args.eat_ckpt, in_chans=args.audio_in_chans)
+        encoder = eat_encoder.load(
+            args.encoder,
+            checkpoint_path=args.eat_ckpt,
+            in_chans=args.audio_in_chans,
+            img_size=args.crop_size,
+        )
     else:
         encoder = vit_encoder.load(args.encoder)
     if 'small' in args.encoder:

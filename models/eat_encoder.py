@@ -50,7 +50,7 @@ class EATEncoderWrapper(nn.Module):
         return self.model(x)
 
 
-def load(name, checkpoint_path=None, in_chans=1):
+def load(name, checkpoint_path=None, in_chans=1, img_size=224):
     if name != "eat_base_10ep":
         raise ValueError("Unsupported EATModel name. Use 'eat_base_10ep'.")
     model = timm.create_model(
@@ -58,6 +58,7 @@ def load(name, checkpoint_path=None, in_chans=1):
         pretrained=False,
         num_classes=0,
         in_chans=in_chans,
+        img_size=img_size,
     )
     if checkpoint_path:
         state_dict = torch.load(checkpoint_path, map_location="cpu")
